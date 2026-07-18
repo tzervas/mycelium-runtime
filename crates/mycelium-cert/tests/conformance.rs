@@ -490,10 +490,17 @@ fn clause_c_memory_safe_in_every_mode() {
 #[test]
 fn clause_c_trusted_base_forbids_unsafe() {
     // Resolve the workspace `crates/` dir relative to this test crate's manifest.
+    // Decomposition note (course-correction Phase B, 2026-07-18): in the component-repo split
+    // `mycelium-core` lives in its own repo, so this workspace can only read the sources it
+    // carries. The `mycelium-core` half of this side-condition is checked by the equivalent
+    // `tests/trusted_base.rs` in the `tzervas/mycelium-core` repo (same assertion, same wording);
+    // the monorepo's copy of this test still checks all trusted-base crates together. The checked
+    // basis therefore remains checked in every home the source lives in (VR-5 — no delegation
+    // without a real check at the delegate).
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates/mycelium-cert has a parent (crates/)");
-    for krate in ["mycelium-core", "mycelium-cert"] {
+    for krate in ["mycelium-cert"] {
         let lib = crates_dir.join(krate).join("src/lib.rs");
         let src =
             std::fs::read_to_string(&lib).unwrap_or_else(|e| panic!("read {}: {e}", lib.display()));
