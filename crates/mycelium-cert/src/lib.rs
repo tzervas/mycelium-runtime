@@ -23,6 +23,7 @@ pub mod check;
 pub mod dense;
 pub mod dense_vsa;
 pub mod mode;
+pub mod store;
 
 use serde::{Deserialize, Serialize};
 
@@ -37,7 +38,8 @@ pub use check::{
 };
 pub use dense::{dense_f32_to_bf16, BF16_MIN_NORMAL, BF16_REL_EPS};
 pub use dense_vsa::{dense_to_vsa, vsa_to_dense, DENSE_VSA_EMP_DELTA, DENSE_VSA_MODEL};
-pub use mode::{gate_swap, GatedSwap, ModeGatedSwapEngine};
+pub use mode::{gate_swap, swap_check_diag, GatedSwap, ModeGatedSwapEngine};
+pub use store::{cert_content_hash, declared_cert_handle_cap, CertStore};
 
 /// Concrete parameters binding a bijection lemma to one use — `{ width, trits }` for binary↔ternary
 /// (lets the certificate be cached by content hash; RFC-0002 §3).
@@ -231,15 +233,16 @@ impl From<SwapError> for EvalError {
 }
 
 /// Whether `(n, m)` admits a lossless binary→ternary swap: `B_n ⊆ T_m ⇔ 2^(n-1) ≤ (3^m − 1)/2`
-/// (`binary-ternary.md` §2). Uses `i128` so the binary side never overflows the comparison.
+/// (`binary-ternary.md` §2). `ternary::max_magnitude` is itself `i128`-typed since E-W1/M-1119, so
+/// this comparison never overflows without any local widening.
 #[must_use]
 pub fn legal_pair(width: u32, trits: u32) -> bool {
     let Some(tern_max) = ternary::max_magnitude(trits) else {
-        return false; // ternary side overflows i64 — far beyond any legal small pair
+        return false; // ternary side overflows i128 — far beyond any legal pair (m >= 81)
     };
     // 2^(n-1): the magnitude of the most-negative n-bit value, the binding constraint.
     let bin_max_neg_mag: i128 = 1i128 << width.saturating_sub(1);
-    bin_max_neg_mag <= i128::from(tern_max)
+    bin_max_neg_mag <= tern_max
 }
 
 /// The content hash of the once-per-swap-kind binary↔ternary round-trip lemma (P1/P2,
@@ -287,8 +290,10 @@ pub fn binary_to_ternary(
         });
     }
     let value = binary::bits_to_int(bits);
-    // Legal pair ⇒ B_n ⊆ T_m ⇒ encoding is total.
-    let trits = ternary::int_to_trits(value, trits_width)
+    // Legal pair ⇒ B_n ⊆ T_m ⇒ encoding is total. `binary::bits_to_int` is `i64`-exact for
+    // `n ≤ 64` (its own doc contract); widen to `ternary::int_to_trits`'s `i128` domain
+    // (E-W1/M-1119) — always exact, never lossy, since `i64 ⊂ i128`.
+    let trits = ternary::int_to_trits(i128::from(value), trits_width)
         .expect("legal pair guarantees the value fits in m trits");
     let target = Repr::Ternary { trits: trits_width };
     let out = Value::new(
@@ -334,8 +339,15 @@ pub fn ternary_to_binary(
             trits,
         });
     }
+    // `ternary::trits_to_int` is `i128`-typed (E-W1/M-1119); `binary::int_to_bits` stays
+    // `i64`-typed (its own `n ≤ 64` contract). A decoded value that does not fit `i64` cannot fit
+    // any `binary_width ≤ 64` range either, so it is `OutOfRange` exactly like any other
+    // off-image decode (P4) — never a silent narrowing/wrap, never a panic.
     let value = ternary::trits_to_int(digits);
-    let bits = binary::int_to_bits(value, binary_width).ok_or(SwapError::OutOfRange)?;
+    let bits = i64::try_from(value)
+        .ok()
+        .and_then(|v| binary::int_to_bits(v, binary_width))
+        .ok_or(SwapError::OutOfRange)?;
     let target = Repr::Binary {
         width: binary_width,
     };

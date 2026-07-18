@@ -35,7 +35,7 @@ fn roundtrip_8x6_exhaustive() {
         let (tern, cert) = binary_to_ternary(&b, 6, &policy()).expect("enc");
         // Encoded value denotes the same integer.
         match tern.payload() {
-            Payload::Trits(t) => assert_eq!(ternary::trits_to_int(t), v),
+            Payload::Trits(t) => assert_eq!(ternary::trits_to_int(t), i128::from(v)),
             other => panic!("expected trits, got {other:?}"),
         }
         assert_eq!(tern.meta().guarantee(), GuaranteeStrength::Exact);
