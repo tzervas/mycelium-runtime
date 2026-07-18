@@ -32,7 +32,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use mycelium_core::ContentHash;
+pub use mycelium_core::{CertMode, ContentHash, GuaranteeStrength};
 
 // ─── A local injective BLAKE3 framing ─────────────────────────────────────────────────────────────
 //
@@ -205,6 +205,290 @@ impl Trace {
     }
 }
 
+// ─── First-fault envelope (RFC-0013 Amendment A1 §10, Draft — captured 2026-07-18) ─────────────────
+//
+// Amendment A1 (§10.7) is explicit: "Nothing in this amendment lands as code with this capture" —
+// this wave (W-A, `PROGRAM-HANDOFF-DESIGN-STEER-2026-07-17.md` §5) is that landing. The envelope is
+// an ADDITIVE, OPTIONAL extension of `Diag` (I1): a `Diag` built without one behaves exactly as
+// before this amendment (§10.7's own stability requirement) — see the `content_hash`/`human`
+// backward-compatibility tests in `src/tests.rs`.
+
+/// Which stage emitted the record (RFC-0013 Amendment A1 §10.2) — a closed enum, no escape hatch:
+/// the amendment names exactly these five phases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// The compile phase.
+    Compile,
+    /// The check (type-check) phase.
+    Check,
+    /// The runtime (evaluation) phase.
+    Runtime,
+    /// The transpile phase.
+    Transpile,
+    /// The packaging (spore build) phase.
+    Packaging,
+}
+
+impl Phase {
+    /// The canonical name for use in human/machine output.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::Compile => "compile",
+            Phase::Check => "check",
+            Phase::Runtime => "runtime",
+            Phase::Transpile => "transpile",
+            Phase::Packaging => "packaging",
+        }
+    }
+}
+
+/// The junction-kind catalog (RFC-0013 Amendment A1 §10.3) — the complete 13-entry Localize-1
+/// attachment list, closed for the common cases with an [`Other`](SiteKind::Other) escape hatch,
+/// mirroring [`Code`]'s shape (`crates/mycelium-diag/src/lib.rs` `Code`, above).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum SiteKind {
+    /// Selection resolution to a `PolicyRef` (check).
+    PolicyResolve,
+    /// Illegal `Repr` pair (check).
+    LegalPairRefuse,
+    /// Cross-paradigm without a written `swap` (check).
+    MissingConversion,
+    /// A total type over a partial regime (check).
+    RegimeTypeLie,
+    /// Swap `Ok`/`Err` / out-of-range (runtime).
+    SwapExec,
+    /// Cert `Validated`/`Refuted`/`NotValidated` — first emitter site is `ModeGatedSwapEngine`'s
+    /// `SwapEngine` impl, the `NotValidated` branch (runtime; `mycelium-cert/src/mode.rs`).
+    SwapCheck,
+    /// Export / certified demand / `Exact` partition (check/runtime).
+    MeetBoundary,
+    /// Dynamic meet of tagged values (runtime).
+    GradeMeet,
+    /// Airlock pass/fail (runtime).
+    SealRemint,
+    /// Mode × grade refuse without a seal (check).
+    ModeFirewall,
+    /// Illegal strengthen (check).
+    GradeAnnotation,
+    /// First bad import edge (check).
+    ImportFirstEdge,
+    /// First poison / residual (transpile).
+    TranspileGap,
+    /// An open-coded site kind identified by a stable string (the registry escape hatch).
+    Other(String),
+}
+
+impl SiteKind {
+    /// The canonical `site_kind` name (RFC-0013 Amendment A1 §10.3 table) for human/machine output.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            SiteKind::PolicyResolve => "policy_resolve",
+            SiteKind::LegalPairRefuse => "legal_pair_refuse",
+            SiteKind::MissingConversion => "missing_conversion",
+            SiteKind::RegimeTypeLie => "regime_type_lie",
+            SiteKind::SwapExec => "swap_exec",
+            SiteKind::SwapCheck => "swap_check",
+            SiteKind::MeetBoundary => "meet_boundary",
+            SiteKind::GradeMeet => "grade_meet",
+            SiteKind::SealRemint => "seal_remint",
+            SiteKind::ModeFirewall => "mode_firewall",
+            SiteKind::GradeAnnotation => "grade_annotation",
+            SiteKind::ImportFirstEdge => "import_first_edge",
+            SiteKind::TranspileGap => "transpile_gap",
+            SiteKind::Other(s) => s.as_str(),
+        }
+    }
+}
+
+/// What a junction concluded (RFC-0013 Amendment A1 §10.2) — closed for the common cases named in
+/// the amendment's prose (`refuse | seal_fail | not_validated | resolved | fallback | remint |
+/// candidate`) with an [`Other`](Decision::Other) escape hatch, mirroring [`Code`]'s shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum Decision {
+    /// The junction refused.
+    Refuse,
+    /// A seal (airlock) failed.
+    SealFail,
+    /// The check did not validate (mirrors [`crate`]-consumer `CheckVerdict::NotValidated`, e.g.
+    /// `mycelium-cert`'s checker — this crate does not depend on that one, KC-3).
+    NotValidated,
+    /// Resolution succeeded.
+    Resolved,
+    /// A fallback path was taken.
+    Fallback,
+    /// A remint (grade re-basing) occurred.
+    Remint,
+    /// A non-auto-applied candidate was produced (never silently applied — X11 posture).
+    Candidate,
+    /// An open-coded decision identified by a stable string (the registry escape hatch).
+    Other(String),
+}
+
+impl Decision {
+    /// The canonical decision name for human/machine output.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Decision::Refuse => "refuse",
+            Decision::SealFail => "seal_fail",
+            Decision::NotValidated => "not_validated",
+            Decision::Resolved => "resolved",
+            Decision::Fallback => "fallback",
+            Decision::Remint => "remint",
+            Decision::Candidate => "candidate",
+            Decision::Other(s) => s.as_str(),
+        }
+    }
+}
+
+/// A stable identifier for one fault **instance** (RFC-0013 Amendment A1 §10.2).
+///
+/// **Judgment call, flagged (not a ratified decision — G2/VR-5).** The amendment leaves the exact
+/// shape genuinely open: "whether `event_id` coincides with `Diag::content_hash()` … or is a
+/// separate per-occurrence counter/nonce is left to the Phase-2 implementation; flagged, not decided
+/// here" (§10.2). This crate's W-A choice is to commit to **neither** shape: `EventId` is an opaque,
+/// caller-supplied string. Nothing in this crate auto-generates one (a global counter/nonce would be
+/// hidden mutable state this crate does not want to own; a content-hash-derived id is available to
+/// any caller via [`EventId::from_content_hash`] for callers that want that shape). This keeps the
+/// question open exactly as the amendment left it, rather than silently picking a side.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventId(pub String);
+
+impl EventId {
+    /// An `EventId` from a caller-supplied opaque string.
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(id.into())
+    }
+
+    /// An `EventId` derived from a [`ContentHash`] — the "coincides with `content_hash()`" shape the
+    /// amendment names as one option (not the only one; see the type's own doc).
+    #[must_use]
+    pub fn from_content_hash(hash: &ContentHash) -> Self {
+        Self(hash.as_str().to_owned())
+    }
+
+    /// The opaque string identifier.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Input grade(s) and the result grade, if any (RFC-0013 Amendment A1 §10.2) — reporting fields
+/// only: they report what the junction already computed and are **never** themselves an upgrade
+/// path (VR-5; §10.4 rule 3).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Grades {
+    /// The input grade(s) the junction consumed.
+    pub input: Vec<GuaranteeStrength>,
+    /// The result grade, if the junction produced one.
+    pub output: Option<GuaranteeStrength>,
+}
+
+/// The first-fault envelope (RFC-0013 Amendment A1 §10.2) — the fields a first-fault junction needs
+/// to answer *where / how / why* in one hop (DESIGN-03 §3.2). Additive over the base [`Diag`]
+/// fields (I1): attaching an envelope never changes `severity`/`code`/`message`/`locus`/`trace`/
+/// `notes`, and every field here **reports** what the emitting junction already decided — this
+/// struct never itself decides anything (§10.7).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FirstFaultEnvelope {
+    /// A stable identifier for this fault instance (shape genuinely open — see [`EventId`]).
+    pub event_id: EventId,
+    /// Which stage emitted the record.
+    pub phase: Phase,
+    /// The junction kind (the 13-entry catalog, §10.3).
+    pub site_kind: SiteKind,
+    /// What the junction concluded.
+    pub decision: Decision,
+    /// The registry machine code for this record (opaque `Declared` string in v0 — DN-22 has not
+    /// ratified the compact-code shape yet; never fabricated as a ratified code).
+    pub how: String,
+    /// Input grade(s) and the result grade, if any (never upgraded by this record — VR-5).
+    pub grades: Grades,
+    /// The content hash of the selection policy that shaped this decision, if any.
+    pub policy_ref: Option<ContentHash>,
+    /// The active `CertMode` at emission time (always present).
+    pub cert_mode: CertMode,
+    /// Matrix row id / predicate id / cert hash the decision rests on, or absent.
+    pub basis_ref: Option<String>,
+    /// The fault this record is downstream of, if any (blame-style causality — §10.4).
+    pub parent_event: Option<EventId>,
+    /// The record this fault directly caused, if any (§10.4).
+    pub child_cause: Option<EventId>,
+}
+
+impl FirstFaultEnvelope {
+    /// A total constructor for the mandatory fields (`event_id`/`phase`/`site_kind`/`decision`/
+    /// `how`/`cert_mode`); every optional field starts explicitly absent (`grades` empty/`None`,
+    /// `policy_ref`/`basis_ref`/`parent_event`/`child_cause` all `None`) — never a fabricated
+    /// placeholder (G2). Use the `with_*` builders to attach the optional fields.
+    #[must_use]
+    pub fn new(
+        event_id: EventId,
+        phase: Phase,
+        site_kind: SiteKind,
+        decision: Decision,
+        how: impl Into<String>,
+        cert_mode: CertMode,
+    ) -> Self {
+        Self {
+            event_id,
+            phase,
+            site_kind,
+            decision,
+            how: how.into(),
+            grades: Grades::default(),
+            policy_ref: None,
+            cert_mode,
+            basis_ref: None,
+            parent_event: None,
+            child_cause: None,
+        }
+    }
+
+    /// Attach the input/output grades (value-semantic builder).
+    #[must_use]
+    pub fn with_grades(mut self, grades: Grades) -> Self {
+        self.grades = grades;
+        self
+    }
+
+    /// Attach the shaping policy's content hash (§10.4 rule 5 — the pack-01 catalog/resolve
+    /// mechanism is the only populating source; this method does not itself resolve one).
+    #[must_use]
+    pub fn with_policy_ref(mut self, policy_ref: ContentHash) -> Self {
+        self.policy_ref = Some(policy_ref);
+        self
+    }
+
+    /// Attach the basis reference (matrix row id / predicate id / cert hash).
+    #[must_use]
+    pub fn with_basis_ref(mut self, basis_ref: impl Into<String>) -> Self {
+        self.basis_ref = Some(basis_ref.into());
+        self
+    }
+
+    /// Attach the parent event this record is downstream of (§10.4 rule 2).
+    #[must_use]
+    pub fn with_parent_event(mut self, parent: EventId) -> Self {
+        self.parent_event = Some(parent);
+        self
+    }
+
+    /// Attach the child record this fault directly caused (§10.4 rule 1).
+    #[must_use]
+    pub fn with_child_cause(mut self, child: EventId) -> Self {
+        self.child_cause = Some(child);
+        self
+    }
+}
+
 // ─── Diag ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// A structured diagnostic record (RFC-0013 §4.1): a content-addressable value over an
@@ -212,6 +496,10 @@ impl Trace {
 /// [`Diag::content_hash`] is a deterministic BLAKE3 over the canonical fields, presentation-
 /// invariant so the human and JSON projections share one identity (I3). Builders are total;
 /// a missing locus is [`None`].
+///
+/// `envelope` (RFC-0013 Amendment A1 §10) is an **additive, optional** extension (I1): a `Diag`
+/// built without one is byte-identical (content hash and `human()` text) to a pre-amendment `Diag`
+/// — see `src/tests.rs` for the backward-compatibility goldens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diag {
     /// The graded severity (typed; never gates propagation — I1).
@@ -226,6 +514,39 @@ pub struct Diag {
     pub trace: Trace,
     /// Free-form notes (EXPLAIN payload, G11).
     pub notes: Vec<String>,
+    /// The first-fault envelope (RFC-0013 Amendment A1 §10), if this record was emitted at a named
+    /// junction (`site_kind`). `None` for every diagnostic that predates/does not use the amendment
+    /// — additive, never substitutive (I1).
+    pub envelope: Option<FirstFaultEnvelope>,
+}
+
+/// Render a locus as `source:line:col` (whatever subset is known), or the explicit unknown marker
+/// `"?"` for an absent locus — used by [`Diag::first_fault_line`]. A small standalone helper (not a
+/// refactor of [`Diag::human`]'s own inline locus rendering) to keep this change's blast radius off
+/// `human()`'s already-tested exact output.
+fn render_where(locus: &Option<Locus>) -> String {
+    let Some(l) = locus else {
+        return "?".to_owned();
+    };
+    let mut loc = String::new();
+    if let Some(s) = &l.source {
+        loc.push_str(s);
+    }
+    if let Some(line) = l.line {
+        if !loc.is_empty() {
+            loc.push(':');
+        }
+        loc.push_str(&line.to_string());
+        if let Some(col) = l.column {
+            loc.push(':');
+            loc.push_str(&col.to_string());
+        }
+    }
+    if loc.is_empty() {
+        "?".to_owned()
+    } else {
+        loc
+    }
 }
 
 impl Diag {
@@ -259,6 +580,7 @@ impl Diag {
             locus: None,
             trace: Trace::empty(),
             notes: Vec::new(),
+            envelope: None,
         }
     }
 
@@ -290,6 +612,14 @@ impl Diag {
         self
     }
 
+    /// Attach a [`FirstFaultEnvelope`] (RFC-0013 Amendment A1 §10) — additive only (I1): this never
+    /// changes `severity`/`code`/`message`/`locus`/`trace`/`notes`.
+    #[must_use]
+    pub fn with_envelope(mut self, envelope: FirstFaultEnvelope) -> Self {
+        self.envelope = Some(envelope);
+        self
+    }
+
     // ── Field accessors ─────────────────────────────────────────────────────────────────────────
 
     /// The typed severity (a `Warn` never silently becomes a pass — I1).
@@ -302,6 +632,36 @@ impl Diag {
     #[must_use]
     pub fn code(&self) -> &Code {
         &self.code
+    }
+
+    /// The attached [`FirstFaultEnvelope`] (RFC-0013 Amendment A1 §10), if any.
+    #[must_use]
+    pub fn envelope(&self) -> Option<&FirstFaultEnvelope> {
+        self.envelope.as_ref()
+    }
+
+    // ── First-fault one-liner (RFC-0013 Amendment A1 §10 / DESIGN-03 §3.2) ─────────────────────
+
+    /// The **lean first-fault one-liner**: `where · site_kind · decision`, in one hop — no tree dig
+    /// (N6/N9, DESIGN-03 §3.2). `None` for an envelope-less `Diag`: there is no `site_kind`/
+    /// `decision` to render, and this method never fabricates one (G2) — a caller with no envelope
+    /// reads [`Diag::human`]/[`Diag::machine`] instead, exactly as before this amendment (I1).
+    ///
+    /// `where` renders the base `Diag`'s `locus` (independent of the envelope) as `source:line:col`
+    /// (whatever subset is known), or the explicit unknown marker `"?"` when no locus is attached —
+    /// never a fabricated position (G2).
+    ///
+    /// # Guarantee: `Exact`
+    /// Pure value transform; no approximation. (RFC-0016 §4.5, VR-5)
+    #[must_use]
+    pub fn first_fault_line(&self) -> Option<String> {
+        let env = self.envelope.as_ref()?;
+        Some(format!(
+            "{} · {} · {}",
+            render_where(&self.locus),
+            env.site_kind.as_str(),
+            env.decision.as_str()
+        ))
     }
 
     // ── Content address (ADR-003 / RFC-0013 I3) ─────────────────────────────────────────────────
@@ -357,6 +717,29 @@ impl Diag {
         c.h.update(&(self.notes.len() as u64).to_le_bytes());
         for note in &self.notes {
             c.str(note);
+        }
+        // Envelope (RFC-0013 Amendment A1 §10): fed into the hash ONLY when present, and nothing at
+        // all when absent — so an envelope-less `Diag`'s hash is byte-identical to what this method
+        // computed before this amendment (backward-compatibility golden in `src/tests.rs`), while an
+        // attached envelope is fully identity-bearing (two Diags differing only in `site_kind` or
+        // `decision` must not collide).
+        if let Some(env) = &self.envelope {
+            c.h.update(&[1u8]);
+            c.str(env.event_id.as_str());
+            c.str(env.phase.as_str());
+            c.str(env.site_kind.as_str());
+            c.str(env.decision.as_str());
+            c.str(&env.how);
+            c.h.update(&(env.grades.input.len() as u64).to_le_bytes());
+            for g in &env.grades.input {
+                c.str(&format!("{g:?}"));
+            }
+            c.opt(env.grades.output.map(|g| format!("{g:?}")).as_deref());
+            c.opt(env.policy_ref.as_ref().map(ContentHash::as_str));
+            c.str(&format!("{:?}", env.cert_mode));
+            c.opt(env.basis_ref.as_deref());
+            c.opt(env.parent_event.as_ref().map(EventId::as_str));
+            c.opt(env.child_cause.as_ref().map(EventId::as_str));
         }
         c.finish()
     }
@@ -453,301 +836,5 @@ impl Diag {
     }
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ── Builder contract ────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn builders_are_total_and_locus_absence_is_explicit() {
-        let d = Diag::error(Code::OutOfRange).message("payload len ≠ width");
-        assert_eq!(d.severity(), Severity::Error);
-        assert_eq!(d.code(), &Code::OutOfRange);
-        // A missing locus is explicit None, never a fabricated zero (G2).
-        assert!(d.locus.is_none());
-    }
-
-    #[test]
-    fn at_records_an_explicit_locus() {
-        let d = Diag::warn(Code::Budget).at(Locus {
-            source: Some("x.myc".into()),
-            line: Some(3),
-            column: None,
-        });
-        let l = d.locus.expect("locus set");
-        assert_eq!(l.line, Some(3));
-        // An absent column stays None — not a fabricated 0 (G2).
-        assert!(l.column.is_none());
-    }
-
-    // ── Severity ordering (typed distinction, never stringly-typed) ─────────────────────────────
-
-    /// `Severity` is a typed distinction with a defined order (RFC-0013 §4.1).
-    /// Mutation witness: removing `PartialOrd`/`Ord` derives makes this fail.
-    #[test]
-    fn severity_is_a_typed_distinction_with_ordering() {
-        assert!(Severity::Debug < Severity::Info);
-        assert!(Severity::Info < Severity::Warn);
-        assert!(Severity::Warn < Severity::Error);
-        // Exhaustively verify all pairs are ordered consistently.
-        for (i, a) in Severity::ALL.iter().enumerate() {
-            for (j, b) in Severity::ALL.iter().enumerate() {
-                match i.cmp(&j) {
-                    std::cmp::Ordering::Less => assert!(*a < *b, "{a:?} < {b:?}"),
-                    std::cmp::Ordering::Greater => assert!(*a > *b, "{a:?} > {b:?}"),
-                    std::cmp::Ordering::Equal => assert_eq!(*a, *b, "{a:?} == {b:?}"),
-                }
-            }
-        }
-    }
-
-    /// `Severity::as_str` round-trips through the serde rename (non-stringly typed).
-    /// Mutation witness: renaming a variant without updating `as_str` breaks this test.
-    #[test]
-    fn severity_as_str_matches_serde_rename() {
-        for s in Severity::ALL {
-            let json = serde_json::to_string(&s).expect("Severity serializes");
-            // serde rename_all = "lowercase" wraps the string in quotes.
-            let expected = format!("\"{}\"", s.as_str());
-            assert_eq!(
-                json, expected,
-                "Severity::{s:?}.as_str() must match serde rename"
-            );
-        }
-    }
-
-    // ── Content hash (ADR-003 / RFC-0013 I3) ───────────────────────────────────────────────────
-
-    /// The content hash is deterministic: the same `Diag` always produces the same hash.
-    /// Mutation witness: changing the domain tag `"mycelium.diag.v1"` in `content_hash` changes all
-    /// hashes and breaks this test.
-    #[test]
-    fn content_hash_is_deterministic() {
-        let d = Diag::error(Code::OutOfRange)
-            .message("test msg")
-            .note("some note");
-        let h1 = d.content_hash();
-        let h2 = d.content_hash();
-        assert_eq!(h1, h2, "content_hash must be deterministic");
-    }
-
-    /// `content_hash()` is presentation-invariant: producing human()/machine() views does not change
-    /// the hash.
-    /// Mutation witness: having `human()` or `machine()` mutate state (impossible with &self, but
-    /// guard it anyway) would break this test.
-    #[test]
-    fn content_hash_is_presentation_invariant() {
-        let d = Diag::error(Code::OutOfRange).message("msg");
-        let h = d.content_hash();
-        let _ = d.human();
-        let _ = d.machine();
-        assert_eq!(
-            d.content_hash(),
-            h,
-            "human()/machine() must not change identity"
-        );
-    }
-
-    /// Distinct canonical fields produce distinct hashes (collision resistance for common cases).
-    /// Mutation witness: removing field-specific hashing in `content_hash` makes two distinct `Diag`s
-    /// collide.
-    #[test]
-    fn distinct_fields_produce_distinct_hashes() {
-        let a = Diag::error(Code::OutOfRange).message("a");
-        let b = Diag::error(Code::OutOfRange).message("b");
-        assert_ne!(
-            a.content_hash(),
-            b.content_hash(),
-            "different message → different hash"
-        );
-
-        let c = Diag::warn(Code::OutOfRange).message("a");
-        assert_ne!(
-            a.content_hash(),
-            c.content_hash(),
-            "different severity → different hash"
-        );
-
-        let d = Diag::error(Code::Budget).message("a");
-        assert_ne!(
-            a.content_hash(),
-            d.content_hash(),
-            "different code → different hash"
-        );
-
-        let e = Diag::error(Code::OutOfRange).message("a").note("extra");
-        assert_ne!(
-            a.content_hash(),
-            e.content_hash(),
-            "extra note → different hash"
-        );
-    }
-
-    /// A `Diag` with a locus vs. without produces distinct hashes (explicit absence, G2).
-    /// Mutation witness: commenting out the locus branch in `content_hash` makes this collide.
-    #[test]
-    fn locus_absence_is_explicit_in_hash() {
-        let without = Diag::error(Code::OutOfRange).message("m");
-        let with_locus = Diag::error(Code::OutOfRange).message("m").at(Locus {
-            source: Some("f.myc".into()),
-            line: None,
-            column: None,
-        });
-        assert_ne!(
-            without.content_hash(),
-            with_locus.content_hash(),
-            "locus changes identity (G2 — absence is distinct from presence)"
-        );
-    }
-
-    /// `None` locus and an all-`None`-field `Some(Locus::default())` produce distinct hashes (G2).
-    /// Mutation witness: changing the locus presence tag from 1 to 0 collapses these two cases.
-    #[test]
-    fn locus_none_differs_from_default_locus() {
-        let no_locus = Diag::error(Code::OutOfRange).message("m");
-        let default_locus = Diag::error(Code::OutOfRange)
-            .message("m")
-            .at(Locus::default()); // all-None fields
-        assert_ne!(
-            no_locus.content_hash(),
-            default_locus.content_hash(),
-            "None locus ≠ Some(Locus::default()) — explicit absence (G2)"
-        );
-    }
-
-    /// A `Diag` with a non-empty trace produces a distinct hash from one without (G2).
-    /// Mutation witness: commenting out the trace encoding in `content_hash` collapses these.
-    #[test]
-    fn trace_is_identity_bearing() {
-        let no_trace = Diag::error(Code::OutOfRange).message("m");
-        let with_trace = Diag::error(Code::OutOfRange)
-            .message("m")
-            .trace(Trace::empty().with_frame("outer"));
-        assert_ne!(
-            no_trace.content_hash(),
-            with_trace.content_hash(),
-            "non-empty trace changes identity"
-        );
-    }
-
-    /// A `Diag` survives clone/re-use with identity unchanged (value-semantic).
-    /// Mutation witness: making `note()` mutate in-place rather than return a new value would cause
-    /// the original's hash to change.
-    #[test]
-    fn diag_identity_unchanged_through_clone() {
-        let base = Diag::error(Code::OutOfRange).message("base");
-        let base_hash = base.content_hash();
-        // Value-semantic builder: `base` is unchanged; the extended record is a new value.
-        let extended = base.clone().note("extra detail");
-        assert_eq!(
-            base.content_hash(),
-            base_hash,
-            "base record identity must not change"
-        );
-        assert_ne!(
-            base.content_hash(),
-            extended.content_hash(),
-            "adding a note changes identity"
-        );
-    }
-
-    // ── Dual projection (G11 / RFC-0013 I3) ────────────────────────────────────────────────────
-
-    /// `human()` is total for any well-formed `Diag` (including empty message, no locus, no notes).
-    /// Mutation witness: making `human()` return an `Option` or panic on empty message breaks this.
-    #[test]
-    fn human_is_total() {
-        let d = Diag::error(Code::OutOfRange);
-        let h = d.human();
-        assert!(h.contains("[ERROR]"), "human() must name the severity");
-        assert!(h.contains("OutOfRange"), "human() must name the code");
-        assert!(h.contains("id:"), "human() must embed the content id (I3)");
-    }
-
-    /// `machine()` is total and embeds the content `id` field.
-    /// Mutation witness: removing the `id` injection from `machine()` makes this fail.
-    #[test]
-    fn machine_is_total_and_embeds_id() {
-        let d = Diag::error(Code::Budget).message("budget exceeded");
-        let json = d.machine();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("machine() must produce valid JSON");
-        assert!(
-            parsed.get("id").is_some(),
-            "machine() must embed the content id (I3)"
-        );
-        let id_field = parsed["id"].as_str().expect("id is a string");
-        assert_eq!(
-            id_field,
-            d.content_hash().as_str(),
-            "embedded id must match content_hash()"
-        );
-    }
-
-    /// `from_json(machine(d))` recovers a record equal to `d` (the round-trip property, I3).
-    /// Mutation witness: injecting the `id` field into JSON without ignoring it on deserialization
-    /// would cause `from_json` to fail with an unknown-field error.
-    #[test]
-    fn machine_to_from_json_round_trips() {
-        let d = Diag::error(Code::OutOfRange)
-            .message("range violation")
-            .at(Locus {
-                source: Some("src.myc".into()),
-                line: Some(12),
-                column: Some(5),
-            })
-            .trace(
-                Trace::empty()
-                    .with_frame("check_range")
-                    .with_frame("validate"),
-            )
-            .note("expected 0..256")
-            .note("got 300");
-        let json = d.machine();
-        let recovered = Diag::from_json(&json).expect("machine() JSON must be valid");
-        assert_eq!(d, recovered, "from_json(machine(d)) must equal d (I3)");
-        assert_eq!(
-            d.content_hash(),
-            recovered.content_hash(),
-            "round-trip preserves content identity (I3)"
-        );
-    }
-
-    /// `from_json` returns an explicit `Err` on malformed input (C1 — never a partial/sentinel record).
-    /// Mutation witness: removing the `?` / error handling from `from_json` makes malformed input
-    /// silently succeed.
-    #[test]
-    fn from_json_returns_explicit_err_on_malformed_input() {
-        // Completely invalid JSON.
-        assert!(Diag::from_json("not json at all").is_err());
-        // Unknown severity variant.
-        assert!(Diag::from_json(r#"{"severity":"unknown_level","code":{"kind":"OutOfRange"},"message":"","locus":null,"trace":{"frames":[]},"notes":[]}"#).is_err());
-    }
-
-    /// The human and machine projections share the same content id (I3).
-    /// Mutation witness: using a different hash in `human()` vs. `content_hash()` would make the
-    /// embedded ids diverge.
-    #[test]
-    fn human_and_machine_share_content_id() {
-        let d = Diag::warn(Code::HashMismatch).message("mismatch detected");
-        let h = d.human();
-        let m = d.machine();
-        let id = d.content_hash().as_str().to_owned();
-        assert!(h.contains(&id), "human() must embed the content id (I3)");
-        assert!(m.contains(&id), "machine() must embed the content id (I3)");
-    }
-
-    /// The `Code::Other` variant round-trips through serde correctly.
-    /// Mutation witness: removing the `Other` variant or changing the serde tag breaks this.
-    #[test]
-    fn code_other_round_trips() {
-        let d = Diag::error(Code::Other("MyCustomCode".into())).message("custom");
-        let json = d.machine();
-        let recovered = Diag::from_json(&json).expect("round-trip");
-        assert_eq!(d.code(), recovered.code());
-        assert_eq!(d.code().as_str(), "MyCustomCode");
-    }
-}
+mod tests;

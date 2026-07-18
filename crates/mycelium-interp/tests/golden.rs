@@ -174,13 +174,15 @@ fn trit_neg_flips_signs() {
 fn tern(value: i64, m: u32) -> Value {
     Value::new(
         Repr::Ternary { trits: m },
-        Payload::Trits(mycelium_core::ternary::int_to_trits(value, m).expect("in range")),
+        Payload::Trits(
+            mycelium_core::ternary::int_to_trits(i128::from(value), m).expect("in range"),
+        ),
         Meta::exact(Provenance::Root),
     )
     .unwrap()
 }
 
-fn trit_value_of(v: &Value) -> i64 {
+fn trit_value_of(v: &Value) -> i128 {
     match v.payload() {
         Payload::Trits(t) => mycelium_core::ternary::trits_to_int(t),
         other => panic!("expected trits, got {other:?}"),
@@ -425,7 +427,9 @@ fn composing_an_approximate_input_is_refused() {
 fn tern_err(value: i64, m: u32, strength: GuaranteeStrength, eps: f64, basis: BoundBasis) -> Value {
     Value::new(
         Repr::Ternary { trits: m },
-        Payload::Trits(mycelium_core::ternary::int_to_trits(value, m).expect("in range")),
+        Payload::Trits(
+            mycelium_core::ternary::int_to_trits(i128::from(value), m).expect("in range"),
+        ),
         Meta::new(
             Provenance::Root,
             strength,

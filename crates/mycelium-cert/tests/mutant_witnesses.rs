@@ -31,7 +31,7 @@ fn byte_of(value: i64) -> Value {
     .unwrap()
 }
 
-fn tern_of(value: i64, trits: u32) -> Value {
+fn tern_of(value: i128, trits: u32) -> Value {
     Value::new(
         Repr::Ternary { trits },
         Payload::Trits(ternary::int_to_trits(value, trits).unwrap()),

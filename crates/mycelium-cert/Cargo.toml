@@ -12,17 +12,25 @@ publish = false
 workspace = true
 
 [dependencies]
-mycelium-core = { git = "https://github.com/tzervas/mycelium-core", rev = "781d3fcceba82acfe6b0eb46650513bd78a2416b" }
+mycelium-core = { git = "https://github.com/tzervas/mycelium-core", rev = "46d2515cbd86d2ae4d1365f4adcd2796737e9f0b" }
 mycelium-interp = { path = "../mycelium-interp" }
 # The M-210 checker discharges bounded instances through the E2-4 tier-i kernel and consumes the
 # shared {ε,δ,strength} certificate (ADR-010; RFC-0002 §2).
-mycelium-numerics = { git = "https://github.com/tzervas/mycelium-value", rev = "fce92daed05e9f10202c202648ec43fb0a6991d7" }
+mycelium-numerics = { git = "https://github.com/tzervas/mycelium-value", rev = "6d230ad2023a716704c697ac6812a2062624b4eb" }
 # The M-231 Dense<->VSA swap reuses the M-131 checked capacity instantiation (RFC-0003 §5).
-mycelium-vsa = { git = "https://github.com/tzervas/mycelium-value", rev = "fce92daed05e9f10202c202648ec43fb0a6991d7" }
+mycelium-vsa = { git = "https://github.com/tzervas/mycelium-value", rev = "6d230ad2023a716704c697ac6812a2062624b4eb" }
+# The canonical RFC-0013 `Diag`/first-fault-envelope record (W-A, DN-142 §4.2): the `swap_check`
+# emitter site (`mode.rs`) presents a `CheckVerdict` through this crate's `Diag`, never a second
+# diagnostic schema (KC-3 / G-9 — `mycelium-diag` depends only on `mycelium-core`, so this adds no
+# cycle).
+mycelium-diag = { path = "../mycelium-diag" }
 serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+# serde_json moved to [dependencies] above (the store's cert-body hashing needs it outside test
+# cfg too); no longer duplicated here.
 # M-882: `mycelium-proj`/`mycelium-spore` were previously dev-dependencies here for the M-794 §13
 # conformance suite (tests/conformance.rs). That created two dev-dep cycles — `cert →[dev] proj → …
 # → l1 → cert` and `cert →[dev] spore → proj → … → l1 → cert` — because (unlike the removed comment

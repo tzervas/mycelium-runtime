@@ -10,13 +10,14 @@
 //! - Axis-B (out-of-range / illegal pair) stays an explicit error in **every** mode (not gated).
 
 use mycelium_cert::{
-    binary_to_ternary, dense_f32_to_bf16, gate_swap, CheckVerdict, GatedSwap, ModeGatedSwapEngine,
-    SwapCertificate,
+    binary_to_ternary, cert_content_hash, dense_f32_to_bf16, gate_swap, CheckVerdict, Fallback,
+    GatedSwap, ModeGatedSwapEngine, NotValidatedReason, SwapCertificate,
 };
 use mycelium_core::{
-    binary, BoundBasis, CertMode, ContentHash, GuaranteeStrength, Meta, Payload, Provenance, Repr,
-    ScalarKind, Value,
+    binary, Bound, BoundBasis, BoundKind, CertMode, ContentHash, GuaranteeStrength, Meta, Payload,
+    Provenance, Repr, ScalarKind, Value,
 };
+use mycelium_diag::{Decision, Severity, SiteKind};
 use mycelium_interp::{EvalError, SwapEngine};
 
 fn policy() -> ContentHash {
@@ -235,4 +236,163 @@ fn certified_engine_returns_value_on_validation() {
         .expect("a valid certified swap returns its value");
     assert_eq!(value.meta().cert_mode(), CertMode::Certified);
     assert_eq!(value.meta().guarantee(), GuaranteeStrength::Exact);
+}
+
+// ---------- G-3 fix: an uncheckable Bounded certificate is an explicit hard error, never `None` ----------
+
+/// A hand-built `Bounded` certificate whose kind is not (yet) checkable
+/// (`BoundKind::Crosstalk`/`Capacity` — `relation_and_claim`'s doc). `raw_swap`'s dispatcher cannot
+/// itself produce such a cert (the audit ledger's "unreachable via the engine today"), so this
+/// exercises the seam a *direct* `gate_swap` caller reaches — exactly the P2 latent surface.
+fn crosstalk_cert() -> SwapCertificate {
+    SwapCertificate::Bounded {
+        src: Repr::Binary { width: 8 },
+        target: Repr::Binary { width: 8 },
+        policy_used: policy(),
+        bound: Bound {
+            kind: BoundKind::Crosstalk {
+                expected: 0.1,
+                tail: None,
+            },
+            basis: BoundBasis::ProvenThm {
+                citation: "test".to_owned(),
+            },
+        },
+    }
+}
+
+/// The `Capacity`-kind sibling of [`crosstalk_cert`] (the other uncheckable `BoundKind`).
+fn capacity_cert() -> SwapCertificate {
+    SwapCertificate::Bounded {
+        src: Repr::Binary { width: 8 },
+        target: Repr::Binary { width: 8 },
+        policy_used: policy(),
+        bound: Bound {
+            kind: BoundKind::Capacity {
+                items: 3,
+                dim: 1_000,
+            },
+            basis: BoundBasis::ProvenThm {
+                citation: "test".to_owned(),
+            },
+        },
+    }
+}
+
+/// **G-3 fix regression (audit ledger row G-3, P2 latent — pre-Grok/PR #555/M-788).** In `Certified`
+/// mode, a `Bounded` certificate whose `BoundKind` is `Crosstalk`/`Capacity` used to surface as
+/// `check: None` on the `GatedSwap` — indistinguishable from `Fast`/`Balanced` legitimately not
+/// checking (`GatedSwap::validated()`'s own contract: absence-of-check ≠ pass, but a direct caller
+/// reading raw `check: None` could still misread "nothing checked" as "nothing to check"). This
+/// test constructs exactly that cert and asserts the explicit hard error, mirroring
+/// `mycelium-std-swap::check_swap`'s handling of the identical case.
+#[test]
+fn certified_uncheckable_bound_kind_is_an_explicit_not_validated_never_a_silent_check_none() {
+    for cert in [crosstalk_cert(), capacity_cert()] {
+        let src = byte_of(1);
+        let value = byte_of(1); // the produced value; its content is irrelevant to this codepath
+        let gated = gate_swap(&src, value, cert, CertMode::Certified)
+            .expect("gate_swap constructs a well-formed Meta for this value");
+        assert!(
+            !gated.validated(),
+            "a Crosstalk/Capacity bound must never be treated as validated (VR-5: absence of a \
+             checkable claim is not a pass)"
+        );
+        match &gated.check {
+            Some(CheckVerdict::NotValidated {
+                reason: NotValidatedReason::Incomplete { .. },
+                fallback: Fallback::UseReference,
+            }) => {} // the fix: an explicit hard error, never `None`.
+            other => panic!(
+                "expected Some(NotValidated{{Incomplete}}), got {other:?} — the G-3 P2 latent \
+                 regression (check: None) has resurfaced"
+            ),
+        }
+
+        // The swap_check Diag (RFC-0013 Amendment A1 §10) is populated too, as a refuse event.
+        let diag = gated.diag.expect("Certified always sets diag (G-3 fix)");
+        assert_eq!(diag.severity(), Severity::Error);
+        let env = diag
+            .envelope()
+            .expect("swap_check event carries an envelope");
+        assert_eq!(env.site_kind, SiteKind::SwapCheck);
+        assert_eq!(env.decision, Decision::NotValidated);
+        assert_eq!(env.cert_mode, CertMode::Certified);
+        assert_eq!(
+            diag.first_fault_line().as_deref(),
+            Some("? · swap_check · not_validated"),
+            "the lean first-fault one-liner (the W-A exit criterion)"
+        );
+    }
+}
+
+// ---------- swap_check crumb + first-fault line on the VALIDATED path ----------
+
+/// A genuinely-checkable `Certified` swap carries a `swap_check` `Info`-severity crumb (never
+/// mandatory to consume — RFC-0013 §4.6 "non-sites") whose lean first-fault line renders the exact
+/// `where · site_kind · decision` shape (the W-A exit criterion).
+#[test]
+fn certified_validated_swap_carries_a_swap_check_crumb_and_first_fault_line() {
+    let engine = ModeGatedSwapEngine::new(CertMode::Certified);
+    let a = byte_of(7);
+    let gated = engine
+        .swap_gated(&a, &Repr::Ternary { trits: 6 }, &policy())
+        .unwrap();
+    assert!(gated.validated());
+    let diag = gated
+        .diag
+        .expect("a validated Certified swap still carries a swap_check crumb");
+    assert_eq!(diag.severity(), Severity::Info);
+    let env = diag.envelope().expect("crumb carries an envelope");
+    assert_eq!(env.site_kind, SiteKind::SwapCheck);
+    assert_eq!(env.decision, Decision::Resolved);
+    assert_eq!(
+        diag.first_fault_line().as_deref(),
+        Some("? · swap_check · resolved")
+    );
+}
+
+/// `Fast`/`Balanced` are non-sites for `swap_check` (RFC-0013 §4.6): no event fires when there is
+/// nothing to report on — `diag` stays `None`.
+#[test]
+fn fast_and_balanced_never_emit_a_swap_check_diag() {
+    let a = byte_of(3);
+    let (raw_value, raw_cert) = binary_to_ternary(&a, 6, &policy()).unwrap();
+    for mode in [CertMode::Fast, CertMode::Balanced] {
+        let g = gate_swap(&a, raw_value.clone(), raw_cert.clone(), mode).unwrap();
+        assert!(
+            g.diag.is_none(),
+            "{mode:?} must not emit a swap_check event — it does not check"
+        );
+    }
+}
+
+// ---------- Meta.cert handle (DN-142 §4.2) — set for the emit modes, absent in Fast ----------
+
+/// `Meta::cert` carries the emitted certificate's content-hash handle in `Balanced`/`Certified`
+/// (the emit modes) and stays `None` in `Fast` (the `LanguageRetentionPolicy` §5 cap is `0` —
+/// nothing is retained to point at). The handle equals the standalone `cert_content_hash` function
+/// — the same one `CertStore` uses as its key — so a `Meta.cert` handle is always resolvable
+/// against a store that actually retained the body, without the two ever disagreeing (DRY).
+#[test]
+fn meta_cert_handle_is_set_for_emit_modes_and_absent_in_fast() {
+    let a = byte_of(5);
+    let (raw_value, raw_cert) = binary_to_ternary(&a, 6, &policy()).unwrap();
+    for mode in CertMode::ALL {
+        let g = gate_swap(&a, raw_value.clone(), raw_cert.clone(), mode).unwrap();
+        match mode {
+            CertMode::Fast => assert!(
+                g.value.meta().cert().is_none(),
+                "fast never sets a cert handle"
+            ),
+            CertMode::Balanced | CertMode::Certified => {
+                let h = g
+                    .value
+                    .meta()
+                    .cert()
+                    .expect("emit modes set the cert handle");
+                assert_eq!(h, &cert_content_hash(&raw_cert));
+            }
+        }
+    }
 }

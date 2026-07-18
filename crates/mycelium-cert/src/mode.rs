@@ -25,10 +25,17 @@
 //! [`Fast`](CertMode::Fast)).
 
 use mycelium_core::{BoundKind, CertMode, ContentHash, Meta, Repr, Value};
+use mycelium_diag::{
+    Code, Decision, Diag, EventId, FirstFaultEnvelope, Grades, Phase, Severity, SiteKind,
+};
 use mycelium_interp::{EvalError, SwapEngine};
 use mycelium_numerics::Certificate;
 
-use crate::{check, CheckVerdict, Evidence, RefinementRelation, SwapCertificate, SwapError};
+use crate::store::cert_content_hash;
+use crate::{
+    check, CheckVerdict, Evidence, Fallback, NotValidatedReason, RefinementRelation,
+    SwapCertificate, SwapError,
+};
 
 /// The outcome of a **mode-gated** swap: the converted value (with its mode-reconciled `Meta`), the
 /// certificate **iff** the mode emits one, and the check verdict **iff** the mode checks it. The
@@ -38,12 +45,20 @@ use crate::{check, CheckVerdict, Evidence, RefinementRelation, SwapCertificate, 
 #[derive(Debug, Clone, PartialEq)]
 pub struct GatedSwap {
     /// The converted value. Its `Meta` carries the [`CertMode`] tag and, in `Fast`, the
-    /// `gate_result`-reconciled `(guarantee, bound)` pair.
+    /// `gate_result`-reconciled `(guarantee, bound)` pair; in `Balanced`/`Certified`, the emitted
+    /// certificate's content-hash handle (`Meta::cert`, DN-142 §4.2).
     pub value: Value,
     /// The emitted certificate, or `None` when the mode does not emit one (`Fast`).
     pub certificate: Option<SwapCertificate>,
-    /// The check verdict, or `None` when the mode does not check (`Fast`, `Balanced`).
+    /// The check verdict, or `None` when the mode does not check (`Fast`, `Balanced`). Never `None`
+    /// for `Certified` (the G-3 fix, audit ledger row G-3): every checkable-or-not certificate gets
+    /// an explicit verdict, so `check.is_none()` unambiguously means "this mode does not check."
     pub check: Option<CheckVerdict>,
+    /// The `swap_check` first-fault event for this gated swap (RFC-0013 Amendment A1 §10.3), if the
+    /// mode ran a check. `None` for `Fast`/`Balanced` (a "non-site" — RFC-0013 §4.6: no event fires
+    /// when there is nothing to report on); `Some` for `Certified`, covering both a `Validated`
+    /// crumb and a `NotValidated` refuse event (see [`swap_check_diag`]).
+    pub diag: Option<Diag>,
 }
 
 impl GatedSwap {
@@ -102,9 +117,15 @@ fn reconcile_fast_meta(value: &Value) -> Result<Value, SwapError> {
 }
 
 /// Tag an already-honest value with a mode (no `(guarantee, bound)` change — `Balanced`/`Certified`
-/// pass the pair through, so only the mode tag is recorded).
-fn tag_mode(value: &Value, mode: CertMode) -> Result<Value, SwapError> {
-    let meta = value.meta().clone().with_cert_mode(mode);
+/// pass the pair through, so only the mode tag is recorded) and, for the emit modes, the
+/// certificate's content-hash **handle** (DN-142 §4.2; P1-Q2) — `cert` is `Some` for
+/// `Balanced`/`Certified` (the emit modes) and `None` for `Fast` (nothing is emitted, so no handle
+/// is meaningful).
+fn tag_mode(value: &Value, mode: CertMode, cert: Option<ContentHash>) -> Result<Value, SwapError> {
+    let mut meta = value.meta().clone().with_cert_mode(mode);
+    if let Some(h) = cert {
+        meta = meta.with_cert(h);
+    }
     Value::new(value.repr().clone(), value.payload().clone(), meta).map_err(SwapError::Wf)
 }
 
@@ -128,25 +149,118 @@ pub fn gate_swap(
             value: reconcile_fast_meta(&value)?,
             certificate: None,
             check: None,
+            diag: None,
         }),
-        CertMode::Balanced => Ok(GatedSwap {
-            value: tag_mode(&value, CertMode::Balanced)?,
-            certificate: Some(cert),
-            check: None,
-        }),
+        CertMode::Balanced => {
+            let handle = cert_content_hash(&cert);
+            Ok(GatedSwap {
+                value: tag_mode(&value, CertMode::Balanced, Some(handle))?,
+                certificate: Some(cert),
+                check: None,
+                diag: None,
+            })
+        }
         CertMode::Certified => {
             // Emit + check (today's full behaviour). The relation/claim are derived from the
             // certificate so the check validates exactly what was emitted (VR-5: never tighter).
-            let verdict = relation_and_claim(&cert).map(|(relation, claimed)| {
-                check(src, &value, relation, claimed, &Evidence::Swap(&cert))
+            //
+            // G-3 fix (audit ledger row G-3, P2 latent, pre-Grok/PR #555/M-788): a `Bounded`
+            // certificate whose `BoundKind` is `Crosstalk`/`Capacity` has no checkable claim
+            // (`relation_and_claim` returns `None` for those two kinds — see its doc). Certified
+            // mode must never let that surface as `check: None` — a `None` here is
+            // indistinguishable from `Fast`/`Balanced` legitimately not checking, so a direct
+            // caller of this function (not just the `SwapEngine::swap` trait impl below) could
+            // read "nothing checked" as "nothing to check" rather than "the checker was asked and
+            // could not decide" (absence-of-check ≠ pass — `GatedSwap::validated()`'s own
+            // contract). The fix mirrors `mycelium-std-swap::check_swap`'s handling of the
+            // identical case (`crates/mycelium-std-swap/src/lib.rs` — the `NotValidatedReason::
+            // Incomplete` FLAG comment there): map the uncheckable-bound-kind case to an explicit
+            // `NotValidated { reason: Incomplete, fallback: UseReference }` instead of `None`, so
+            // `check` is `Some(..)` for every `Certified`-mode `GatedSwap`, never ambiguous.
+            let verdict = Some(match relation_and_claim(&cert) {
+                Some((relation, claimed)) => {
+                    check(src, &value, relation, claimed, &Evidence::Swap(&cert))
+                }
+                None => CheckVerdict::NotValidated {
+                    reason: NotValidatedReason::Incomplete {
+                        detail: "bound kind not checkable at this checker version (only ε and δ \
+                                 certificates; FLAG: M-231 v1 scope — mirrors \
+                                 mycelium-std-swap::check_swap's handling of the same case)"
+                            .to_owned(),
+                    },
+                    fallback: Fallback::UseReference,
+                },
+            });
+            let handle = cert_content_hash(&cert);
+            // Every `Certified`-mode gated swap gets a `swap_check` event (the site the catalog
+            // names — RFC-0013 Amendment A1 §10.3): a `Validated` crumb or a `NotValidated` refuse
+            // event, never neither (`verdict` is always `Some` after the G-3 fix above). The event's
+            // id is derived from the produced value's own content hash (the "coincides with
+            // content_hash()" `EventId` shape — see that type's doc for the open alternative).
+            let diag = verdict.as_ref().map(|v| {
+                swap_check_diag(
+                    v,
+                    CertMode::Certified,
+                    EventId::from_content_hash(&value.content_hash()),
+                )
             });
             Ok(GatedSwap {
-                value: tag_mode(&value, CertMode::Certified)?,
+                value: tag_mode(&value, CertMode::Certified, Some(handle))?,
                 certificate: Some(cert),
                 check: verdict,
+                diag,
             })
         }
     }
+}
+
+/// The `swap_check` first-fault event for `verdict` under `mode` (RFC-0013 Amendment A1 §10.3 —
+/// `site_kind: swap_check`, "Cert Validated/Refuted/NotValidated"; the first emitter site is this
+/// module's [`SwapEngine`] impl). A [`CheckVerdict::NotValidated`] renders an `Error`-severity
+/// refuse event; a [`CheckVerdict::Validated`] renders an `Info`-severity crumb (never mandatory to
+/// consume — RFC-0013 §4.6 "non-sites": a pure `Exact` success is an optional crumb, not a
+/// mandatory emission). `event_id` is caller-supplied — this function does not itself mint one
+/// (`EventId`'s shape is genuinely open, RFC-0013 Amendment A1 §10.2; see that type's doc).
+///
+/// Additive only (I1): this `Diag` **presents** the verdict the checker already computed. It never
+/// itself decides validity, and constructing it here has no effect on whether
+/// [`ModeGatedSwapEngine`]'s [`SwapEngine::swap`] `Result` is `Ok`/`Err` — that decision is made
+/// independently, from the same `verdict`, exactly as before this function existed.
+#[must_use]
+pub fn swap_check_diag(verdict: &CheckVerdict, mode: CertMode, event_id: EventId) -> Diag {
+    let (severity, code, message, decision, grades) = match verdict {
+        CheckVerdict::Validated { strength } => (
+            Severity::Info,
+            Code::Other("SwapCheckValidated".to_owned()),
+            format!("swap certificate validated at {strength:?}"),
+            Decision::Resolved,
+            Grades {
+                input: Vec::new(),
+                output: Some(*strength),
+            },
+        ),
+        CheckVerdict::NotValidated { reason, fallback } => (
+            Severity::Error,
+            Code::Other("SwapCheckNotValidated".to_owned()),
+            format!("swap certificate did not validate: {reason:?} (fallback: {fallback:?})"),
+            Decision::NotValidated,
+            Grades::default(),
+        ),
+    };
+    let envelope = FirstFaultEnvelope::new(
+        event_id,
+        Phase::Runtime,
+        SiteKind::SwapCheck,
+        decision,
+        // `how`: opaque `Declared` registry code (v0 — DN-22 has not ratified the compact-code
+        // shape yet; never fabricated as a ratified code, RFC-0013 Amendment A1 §10.2).
+        "swap_check.v0",
+        mode,
+    )
+    .with_grades(grades);
+    Diag::with_severity(severity, code)
+        .message(message)
+        .with_envelope(envelope)
 }
 
 /// A [`SwapEngine`] that wraps the [`CertifiedSwapEngine`](crate::CertifiedSwapEngine) surface and
@@ -203,11 +317,31 @@ impl SwapEngine for ModeGatedSwapEngine {
     fn swap(&self, src: &Value, target: &Repr, policy: &ContentHash) -> Result<Value, EvalError> {
         let gated = self.swap_gated(src, target, policy)?;
         // Never-silent: in Certified, a non-validating check must not yield a value as if validated.
+        // This is the first `swap_check` emitter site (RFC-0013 Amendment A1 §10.3): the refuse
+        // event was already constructed in `gate_swap` (`gated.diag`) — its `human()` rendering
+        // carries the error text, so the diagnostic record *is* the error message rather than a
+        // second, independently-worded description of the same refusal (I1: additive presentation
+        // over the already-explicit `NotValidated` verdict, never a separate judgment).
         if let Some(CheckVerdict::NotValidated { reason, .. }) = &gated.check {
-            return Err(EvalError::Swap(format!(
-                "certified swap did not validate: {reason:?} (fallback: keep the reference value)"
-            )));
+            let text = gated.diag.as_ref().map_or_else(
+                || {
+                    // Defensive fallback only: `gate_swap`'s Certified branch always sets `diag`
+                    // alongside `check` (see its doc), so this arm is unreachable in practice — it
+                    // exists so a future refactor that breaks that invariant fails loud, not silent.
+                    format!(
+                        "certified swap did not validate: {reason:?} (fallback: keep the \
+                         reference value)"
+                    )
+                },
+                Diag::human,
+            );
+            return Err(EvalError::Swap(text));
         }
+        // The validated path's crumb (RFC-0013 §4.6 "non-sites" — optional, never mandatory to
+        // consume) is `gated.diag`; the trait's fixed `Result<Value, EvalError>` has no slot to
+        // return it, so a caller that wants it uses `swap_gated` directly. The cert **handle** is
+        // already on `gated.value`'s `Meta` (`Meta::cert`, DN-142 §4.2) and travels with the value
+        // regardless of which method the caller used.
         Ok(gated.value)
     }
 }
