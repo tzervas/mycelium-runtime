@@ -107,8 +107,8 @@
 #![forbid(unsafe_code)]
 
 pub mod budget;
-pub mod parallel;
 pub mod host;
+pub mod parallel;
 pub mod prims;
 pub mod supervise;
 pub mod swap;
@@ -122,8 +122,8 @@ use mycelium_core::{Alt, CoreValue, Datum, GuaranteeStrength, Node, Repr, Value,
 use mycelium_workstack::{ensure_sufficient_stack, BudgetError, DepthGuard, RecursionBudget};
 
 pub use budget::{Budgets, EffectBudget, EffectBudgetExhausted, EffectKind};
-pub use parallel::{is_pure, plan_parallel, BatchHead, ParallelPlan};
 pub use host::{install_host_ops, HostCallRegistry, WILD_PREFIX};
+pub use parallel::{is_pure, plan_parallel, BatchHead, ParallelPlan};
 pub use prims::PrimRegistry;
 pub use supervise::{
     CancelToken, Cancelled, Escalation, RestartIntensity, Supervisor, TaskOutcome,

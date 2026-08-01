@@ -90,10 +90,8 @@ mod tests {
         assert!(r.has_host("smoke_id"));
         assert!(r.has_host("wild:smoke_id"));
         let v = bin1(true);
-        let out = r
-            .get("wild:smoke_id")
-            .expect("registered")("wild:smoke_id", &[&v])
-            .expect("eval");
+        let out =
+            r.get("wild:smoke_id").expect("registered")("wild:smoke_id", &[&v]).expect("eval");
         assert_eq!(out, v);
     }
 }
