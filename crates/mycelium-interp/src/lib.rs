@@ -108,6 +108,7 @@
 
 pub mod budget;
 pub mod parallel;
+pub mod host;
 pub mod prims;
 pub mod supervise;
 pub mod swap;
@@ -122,6 +123,7 @@ use mycelium_workstack::{ensure_sufficient_stack, BudgetError, DepthGuard, Recur
 
 pub use budget::{Budgets, EffectBudget, EffectBudgetExhausted, EffectKind};
 pub use parallel::{is_pure, plan_parallel, BatchHead, ParallelPlan};
+pub use host::{install_host_ops, HostCallRegistry, WILD_PREFIX};
 pub use prims::PrimRegistry;
 pub use supervise::{
     CancelToken, Cancelled, Escalation, RestartIntensity, Supervisor, TaskOutcome,
