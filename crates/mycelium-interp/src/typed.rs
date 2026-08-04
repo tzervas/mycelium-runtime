@@ -39,13 +39,25 @@
 //! key is a loud, typed miss (never a panic, never a silent no-op) — see the `unknown_typed_prim`
 //! test below.
 //!
-//! ## Not yet wired into `Interpreter::eval`
+//! ## Wired into `Interpreter::eval` (S-TYPED-PRIM-ENV, this crate's half)
 //!
-//! This module ships the schema + registry only (S-PRIMSIG-SCHEMA / S-TYPED-PRIM-REGISTRY).
-//! Routing real `Node::Op { prim: "prim:…" }` IR through a live [`TypedPrimRegistry`] at
-//! evaluation time is a separate, later surface (`S-TYPED-PRIM-ENV` / `S-TYPED-PRIM-CALL-CHECK`,
-//! `mycelium-l1`; `S-CLI-TYPED-PRIM-WIRING`, `mycelium-cli`) — strictly additive over this one,
-//! not implied by it. `Interpreter`/`EvalError` are untouched by this file.
+//! `Interpreter` carries a `typed_prims: TypedPrimRegistry` field (empty by default, installed
+//! via [`Interpreter::with_typed_prims`](crate::Interpreter::with_typed_prims), mirroring
+//! [`Interpreter::with_host_ops`](crate::Interpreter::with_host_ops)). A live `Node::Op { prim:
+//! "prim:…" }` at eval time is dispatched through it — a namespace disjoint from `wild:`, so a
+//! `prim:` key never falls back to the untyped `self.prims` table and a `wild:` key never
+//! resolves through `typed_prims`. An unresolved `prim:<name>` is the same loud
+//! [`crate::EvalError::UnknownPrim`] miss `wild:` produces on a registry gap.
+//!
+//! This closes the *runtime execution* half of S-TYPED-PRIM-ENV only. Two surfaces remain
+//! elsewhere in the train and are **not** touched by this crate: (1) `mycelium-l1`'s checker
+//! producing `prim:` dispatch keys from `.myc` source and verifying a call site against a
+//! [`PrimSig`] before eval ever sees it (`S-TYPED-PRIM-CALL-CHECK`) — per `mycelium-l1`#26 this
+//! side is already implemented (`TypedPrimEnv` / `check_phylum_with_deps_and_prims`); and (2)
+//! `mycelium-cli` constructing a populated `TypedPrimRegistry` from a typed-prim provider crate
+//! (e.g. `mycelium-std-io`) and calling `Interpreter::with_typed_prims` / the l1 `_with_prims`
+//! checker entry point instead of the zero-prim defaults (`S-CLI-TYPED-PRIM-WIRING`) — this is
+//! still open.
 
 use std::collections::BTreeMap;
 
