@@ -4,5 +4,6 @@
 mod guard_hole_census;
 mod parallel;
 mod prims;
+mod typed_eval;
 mod wild;
 mod with_depth_parity;

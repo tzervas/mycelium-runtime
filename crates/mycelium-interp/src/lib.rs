@@ -119,6 +119,7 @@ pub mod parallel;
 pub mod prims;
 pub mod supervise;
 pub mod swap;
+pub mod typed;
 pub mod wild;
 
 #[cfg(test)]
@@ -137,6 +138,7 @@ pub use supervise::{
     CancelToken, Cancelled, Escalation, RestartIntensity, Supervisor, TaskOutcome,
 };
 pub use swap::{IdentitySwapEngine, SwapEngine};
+pub use typed::{PrimSig, TySpec, TypedPrimRegistry, WidthSpec, PRIM_PREFIX};
 pub use wild::{
     HostCapabilities, HostFloor, HostOpFn, HostOpRegistry, StdHostFloor, FFI_EFFECT,
     HOST_BYTE_HARD_CAP,
@@ -396,6 +398,11 @@ pub struct Interpreter {
     /// Host-op registry for the reserved `wild:` prim namespace (RFC-0028 §4.3; A1). Empty by
     /// default — pure/deterministic fragments see a typed miss on every `wild:<name>`.
     host_ops: HostOpRegistry,
+    /// Checked-prim registry for the reserved `prim:` namespace (S-TYPED-PRIM-REGISTRY /
+    /// S-TYPED-PRIM-ENV) — disjoint from `wild:`/`host_ops` above; see [`crate::typed`]'s module
+    /// docs. Empty by default — no `prim:<name>` is dispatchable until a provider installs one
+    /// via [`with_typed_prims`](Self::with_typed_prims).
+    typed_prims: TypedPrimRegistry,
     /// Runtime half of `@std-sys` + `!{ffi}`: must grant `ffi` before a registered host op runs.
     host_caps: HostCapabilities,
     swap: Arc<dyn SwapEngine>,
@@ -415,6 +422,9 @@ impl Default for Interpreter {
             prims: PrimRegistry::with_builtins(),
             // A1: default grants **no** host ops and **no** `ffi` — pure fragments stay pure.
             host_ops: HostOpRegistry::empty(),
+            // S-TYPED-PRIM-ENV: default grants **no** `prim:` ops either (empty-by-design,
+            // mirrors host_ops above — see TypedPrimRegistry::empty's docs).
+            typed_prims: TypedPrimRegistry::empty(),
             host_caps: HostCapabilities::default(),
             swap: Arc::new(IdentitySwapEngine),
             fuel: DEFAULT_FUEL,
@@ -436,6 +446,7 @@ impl Interpreter {
         Interpreter {
             prims,
             host_ops: HostOpRegistry::empty(),
+            typed_prims: TypedPrimRegistry::empty(),
             host_caps: HostCapabilities::default(),
             swap: Arc::from(swap),
             fuel: DEFAULT_FUEL,
@@ -458,6 +469,19 @@ impl Interpreter {
     pub fn with_host_ops(mut self, host_ops: HostOpRegistry, host_caps: HostCapabilities) -> Self {
         self.host_ops = host_ops;
         self.host_caps = host_caps;
+        self
+    }
+
+    /// Install a checked-prim provider (`mycelium-std-io`, `mycelium-std-net`, …): the `prim:`
+    /// counterpart to [`with_host_ops`](Self::with_host_ops) (S-TYPED-PRIM-ENV). Unlike `wild:`,
+    /// `prim:` carries no capability gate of its own here — a `prim:<name>` signature's declared
+    /// `effects` (see [`PrimSig`]) are a `myc check`-time obligation on the caller (checked by the
+    /// consumer, e.g. `mycelium-l1`), not a runtime grant this constructor controls. This method
+    /// only wires *dispatch*: which registered [`PrimFn`](prims::PrimFn) a `prim:<name>` key
+    /// resolves to at eval time. Replaces any previously-installed typed-prim registry.
+    #[must_use]
+    pub fn with_typed_prims(mut self, typed_prims: TypedPrimRegistry) -> Self {
+        self.typed_prims = typed_prims;
         self
     }
 
@@ -562,6 +586,18 @@ impl Interpreter {
                     } else {
                         crate::wild::dispatch_wild(&self.host_ops, self.host_caps, prim, &values)?
                     }
+                } else if prim.starts_with(crate::typed::PRIM_PREFIX) {
+                    // S-TYPED-PRIM-ENV bridge: `prim:<name>` is a namespace disjoint from
+                    // `wild:` (see crate::typed's module docs) — dispatch through the checked
+                    // TypedPrimRegistry, never through the untyped `self.prims` table. An
+                    // unresolved `prim:<name>` is the same loud, typed EvalError::UnknownPrim
+                    // miss `wild:` produces on a registry gap — never a silent fallback to the
+                    // untyped table.
+                    let (_, f) = self
+                        .typed_prims
+                        .get_typed(prim)
+                        .ok_or_else(|| EvalError::UnknownPrim(prim.clone()))?;
+                    f(prim, &values)?
                 } else {
                     let f = self
                         .prims
